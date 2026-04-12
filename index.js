@@ -96,14 +96,32 @@ function parseAddressParts(rawAddress) {
 
 async function resolveAddressIds(province, district, commune) {
   try {
-    // Step 1: Get all provinces from Pancake API
+    // Step 1: Get all provinces — exact URL format from Pancake POS network tab
     if (!cachedProvinces) {
       const res = await axios.get(`${PANCAKE_BASE}/address/provinces`, {
-        params: { country_code: 63, all: true, api_key: PANCAKE_API_KEY },
+        params: { country_code: 63, all: "true" },
+        headers: { "api-key": PANCAKE_API_KEY },
         timeout: 10000
       });
       cachedProvinces = res.data?.data || [];
+
+      // Fallback: try with api_key as query param
+      if (!cachedProvinces.length) {
+        const res2 = await axios.get(`${PANCAKE_BASE}/address/provinces?country_code=63&all=true&api_key=${PANCAKE_API_KEY}`, {
+          timeout: 10000
+        });
+        cachedProvinces = res2.data?.data || [];
+      }
+
       console.log(`Loaded ${cachedProvinces.length} provinces from Pancake`);
+      if (cachedProvinces.length > 0) {
+        console.log("Sample province:", JSON.stringify(cachedProvinces[0]));
+      }
+    }
+
+    if (!cachedProvinces.length) {
+      console.log("No provinces loaded — address API not accessible");
+      return null;
     }
 
     // Step 2: Match province
@@ -114,32 +132,33 @@ async function resolveAddressIds(province, district, commune) {
     }
     console.log(`Province matched: ${matchedProvince.name} (${matchedProvince.id})`);
 
-    // Step 3: Get districts for matched province
+    // Step 3: Get districts
     const distRes = await axios.get(`${PANCAKE_BASE}/address/districts`, {
-      params: { province_id: matchedProvince.id, api_key: PANCAKE_API_KEY },
+      params: { province_id: matchedProvince.id },
+      headers: { "api-key": PANCAKE_API_KEY },
       timeout: 10000
     });
     const districts = distRes.data?.data || [];
-    const matchedDistrict = findBestMatch(districts, ["name", "name_en"], district);
+    console.log(`Loaded ${districts.length} districts for ${matchedProvince.name}`);
 
+    const matchedDistrict = findBestMatch(districts, ["name", "name_en"], district);
     if (!matchedDistrict) {
       console.log("District not matched:", district);
-      return {
-        province_id: matchedProvince.id,
-        province_name: matchedProvince.name
-      };
+      return { province_id: matchedProvince.id, province_name: matchedProvince.name };
     }
     console.log(`District matched: ${matchedDistrict.name} (${matchedDistrict.id})`);
 
-    // Step 4: Get communes/barangays for matched district
+    // Step 4: Get communes
     let commune_id = null, commune_name = null;
     if (commune) {
       try {
         const commRes = await axios.get(`${PANCAKE_BASE}/address/communes`, {
-          params: { district_id: matchedDistrict.id, api_key: PANCAKE_API_KEY },
+          params: { district_id: matchedDistrict.id },
+          headers: { "api-key": PANCAKE_API_KEY },
           timeout: 10000
         });
         const communes = commRes.data?.data || [];
+        console.log(`Loaded ${communes.length} communes for ${matchedDistrict.name}`);
         const matchedCommune = findBestMatch(communes, ["name", "name_en"], commune);
         if (matchedCommune) {
           commune_id = matchedCommune.id;
@@ -160,7 +179,7 @@ async function resolveAddressIds(province, district, commune) {
       commune_name: commune_name || commune
     };
   } catch (e) {
-    console.error("resolveAddressIds error:", e.message);
+    console.error("resolveAddressIds error:", e.message, e.response?.status, e.response?.data);
     return null;
   }
 }
