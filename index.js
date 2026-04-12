@@ -12,6 +12,7 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const PANCAKE_API_KEY = process.env.PANCAKE_API_KEY;
 const PANCAKE_SHOP_ID = process.env.PANCAKE_SHOP_ID;
 const PANCAKE_BASE = "https://pos.pages.fm/api/v1";
+const PSGC_BASE = "https://psgc.gitlab.io/api";
 
 const PACK_INFO = {
   starter: { custom_id: "SP-499", name: "Starter Pack - FurBiotics", price: 499000 },
@@ -22,10 +23,17 @@ const PACK_INFO = {
 const conversationHistory = {};
 const processedOrders = new Set();
 
-// ─── Address Resolution ────────────────────────────────────────────
+// Cache para hindi paulit-ulit mag-fetch ng PSGC data
+let psgcProvinces = null;
+let psgcCities = null;
+
+// ─── PSGC Address Resolution ───────────────────────────────────────
 
 function normalize(str) {
   return (str || "").toLowerCase()
+    .replace(/\bcity\b/g, "")
+    .replace(/\bmunicipality\b/g, "")
+    .replace(/\bbrgy\.?\b/gi, "")
     .replace(/[^a-z0-9\s]/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -36,10 +44,11 @@ function similarity(a, b) {
   const nb = normalize(b);
   if (!na || !nb) return 0;
   if (na === nb) return 1;
-  if (na.includes(nb) || nb.includes(na)) return 0.9;
-  const wordsA = na.split(" ");
-  const wordsB = nb.split(" ");
-  const matches = wordsA.filter(w => w.length > 2 && wordsB.some(wb => wb.includes(w) || w.includes(wb)));
+  if (na.includes(nb) || nb.includes(na)) return 0.85;
+  const wordsA = na.split(" ").filter(w => w.length > 2);
+  const wordsB = nb.split(" ").filter(w => w.length > 2);
+  if (!wordsA.length || !wordsB.length) return 0;
+  const matches = wordsA.filter(w => wordsB.some(wb => wb.includes(w) || w.includes(wb)));
   return matches.length / Math.max(wordsA.length, wordsB.length);
 }
 
@@ -50,7 +59,7 @@ function findBestMatch(list, nameField, query) {
     const score = similarity(item[nameField] || "", query);
     if (score > bestScore) { bestScore = score; best = item; }
   }
-  return bestScore > 0.3 ? best : null;
+  return bestScore > 0.3 ? { item: best, score: bestScore } : null;
 }
 
 function parseAddressParts(rawAddress) {
@@ -73,9 +82,9 @@ function parseAddressParts(rawAddress) {
     district = parts[0];
   }
 
-  // NCR/Metro Manila handling
+  // NCR special handling
   if (/metro manila|ncr|national capital/i.test(province)) {
-    province = district;
+    province = "Metro Manila";
   }
 
   return { street, commune, district, province };
@@ -83,40 +92,88 @@ function parseAddressParts(rawAddress) {
 
 async function resolveAddressIds(province, district, commune) {
   try {
-    const provRes = await axios.get(`${PANCAKE_BASE}/address/provinces`, {
-      params: { api_key: PANCAKE_API_KEY }
-    });
-    const provinces = provRes.data?.data || provRes.data || [];
-    const matchedProvince = findBestMatch(provinces, "name", province);
-    if (!matchedProvince) {
+    // Fetch all provinces from PSGC
+    if (!psgcProvinces) {
+      const res = await axios.get(`${PSGC_BASE}/provinces/`, { timeout: 8000 });
+      psgcProvinces = res.data;
+    }
+
+    // Also fetch cities/municipalities if not cached
+    if (!psgcCities) {
+      const res = await axios.get(`${PSGC_BASE}/cities-municipalities/`, { timeout: 8000 });
+      psgcCities = res.data;
+    }
+
+    // Match province
+    let matchedProvince = null;
+    let province_id = null;
+    let province_name = null;
+
+    // Special NCR handling
+    if (/metro manila|ncr|quezon city|manila|makati|pasig|taguig|caloocan|las pinas|paranaque|pasay|valenzuela|malabon|mandaluyong|marikina|muntinlupa|navotas|pateros|san juan/i.test(province + " " + district)) {
+      province_id = "133900000"; // NCR PSGC code
+      province_name = "Metro Manila";
+    } else {
+      const provMatch = findBestMatch(psgcProvinces, "name", province);
+      if (provMatch) {
+        matchedProvince = provMatch.item;
+        province_id = matchedProvince.code;
+        province_name = matchedProvince.name;
+      }
+    }
+
+    if (!province_id) {
       console.log("Province not matched:", province);
       return null;
     }
 
-    const distRes = await axios.get(`${PANCAKE_BASE}/address/districts`, {
-      params: { api_key: PANCAKE_API_KEY, province_id: matchedProvince.id }
-    });
-    const districts = distRes.data?.data || distRes.data || [];
-    const matchedDistrict = findBestMatch(districts, "name", district);
+    // Convert PSGC province code to Pancake province_id format
+    // PSGC: "0124900000" (Laguna) → Pancake uses shorter numeric IDs
+    // Based on observation: Pancake uses "101" style IDs which are region+province codes
+    const pancakeProvinceId = province_id.substring(0, 3).replace(/^0+/, "") || province_id;
 
-    if (!matchedDistrict) {
-      console.log("District not matched:", district);
-      return { province_id: matchedProvince.id, province_name: matchedProvince.name };
+    // Match city/municipality
+    let district_id = null;
+    let district_name = null;
+
+    const cityMatch = findBestMatch(psgcCities, "name", district);
+    if (cityMatch) {
+      const city = cityMatch.item;
+      district_id = city.code?.substring(0, 5).replace(/^0+/, "") || null;
+      district_name = city.name;
     }
 
-    const commRes = await axios.get(`${PANCAKE_BASE}/address/communes`, {
-      params: { api_key: PANCAKE_API_KEY, district_id: matchedDistrict.id }
-    });
-    const communes = commRes.data?.data || commRes.data || [];
-    const matchedCommune = commune ? findBestMatch(communes, "name", commune) : null;
+    // Match barangay if commune provided
+    let commune_id = null;
+    let commune_name = null;
+
+    if (commune && district_id) {
+      try {
+        // Get barangays for matched city
+        const cityCode = cityMatch?.item?.code;
+        if (cityCode) {
+          const brgyRes = await axios.get(`${PSGC_BASE}/cities-municipalities/${cityCode}/barangays/`, { timeout: 8000 });
+          const barangays = brgyRes.data;
+          const brgyMatch = findBestMatch(barangays, "name", commune);
+          if (brgyMatch) {
+            commune_id = brgyMatch.item.code?.replace(/^0+/, "") || null;
+            commune_name = brgyMatch.item.name;
+          }
+        }
+      } catch (e) {
+        console.log("Barangay lookup failed:", e.message);
+      }
+    }
+
+    console.log("Resolved IDs:", { province_id: pancakeProvinceId, province_name, district_id, district_name, commune_id, commune_name });
 
     return {
-      province_id: matchedProvince.id,
-      province_name: matchedProvince.name,
-      district_id: matchedDistrict.id,
-      district_name: matchedDistrict.name,
-      commune_id: matchedCommune?.id || null,
-      commune_name: matchedCommune?.name || commune || null
+      province_id: pancakeProvinceId,
+      province_name: province_name || province,
+      district_id,
+      district_name: district_name || district,
+      commune_id,
+      commune_name: commune_name || commune
     };
   } catch (e) {
     console.error("resolveAddressIds error:", e.message);
@@ -154,14 +211,12 @@ async function createPancakeOrder(orderData) {
 
     const { street, commune, district, province } = parseAddressParts(address);
     const addrIds = await resolveAddressIds(province, district, commune);
-    console.log("Address parts:", { street, commune, district, province });
-    console.log("Address IDs resolved:", addrIds);
 
     const shippingAddress = {
       full_name: name,
       phone_number: cleanPhone,
-      address: street || commune || address,
-      full_address: address,
+      address: street || address,
+      full_address: [street, commune, district, province].filter(Boolean).join(", "),
       country_code: "63",
       ...(addrIds && {
         province_id: addrIds.province_id,
@@ -193,10 +248,10 @@ async function createPancakeOrder(orderData) {
       payload,
       { params: { api_key: PANCAKE_API_KEY } }
     );
-    console.log("Pancake order created:", JSON.stringify(res.data));
+    console.log("Order created:", res.data?.data?.id || JSON.stringify(res.data).substring(0, 200));
     return res.data;
   } catch (e) {
-    console.error("createPancakeOrder error:", e.message, JSON.stringify(e.response?.data));
+    console.error("createPancakeOrder error:", e.message, JSON.stringify(e.response?.data || {}).substring(0, 200));
     return null;
   }
 }
@@ -219,32 +274,30 @@ function parseOrderSignal(text) {
 
 const SYSTEM_PROMPT = `Ikaw ang friendly assistant ng Furbiotics Philippines. Tulungan ang mga fur parents at gawing customer sila nang natural — hindi forced, hindi salesy.
 
----
-
 RULES SA PAGSAGOT:
 - 1 to 3 sentences lang — maikli, natural, parang tao
 - Walang asterisks, walang bold, walang bullets, walang formatting
-- Pwede mag-smile emoji minsan pero huwag lagi
+- Smile emoji lang minsan — huwag gumamit ng paw emoji o iba pang emoji
 - Taglish — casual, friendly
 - Huwag paulit-ulit magtanong ng info na nabigay na
 - Mukhang tao ang dating, hindi bot
+- Huwag mag-upsell pagkatapos ng order
 
 ---
 
-EXACT NA ORDER FLOW — SUNDIN ITO PALAGI:
+EXACT NA ORDER FLOW:
 
 STEP 1 — PRICE INQUIRY
-Kapag nagtanong ng "HM", "hm", "how much", "magkano", "pila", "presyo", o kahit anong tanong sa presyo:
-Ibigay MUNA ang pricing, tapos tanungin kung alin ang gusto nila.
+Kapag nagtanong ng "HM", "hm", "how much", "magkano", "pila", "presyo", o anumang tanong sa presyo:
+Ibigay MUNA ang pricing, tapos tanungin kung alin ang gusto.
 
-Sagot:
-"Meron kaming tatlong options! Starter Pack (1 bote) 499 pesos, Duo Pack (2 bote) 699 pesos, at Family Pack (3 bote) 999 pesos. Lahat may free shipping. Alin sa tatlo ang trip mo?"
+"Meron kaming tatlong options: Starter Pack (1 bote) 499 pesos, Duo Pack (2 bote) 699 pesos, at Family Pack (3 bote) 999 pesos. Lahat may free shipping. Alin sa tatlo ang trip mo?"
 
 STEP 2 — KAPAG PUMILI NA NG PACK
-Tanungin lang: "GCash o COD?"
+"GCash o COD?"
 
 STEP 3A — KUNG GCASH
-Ibigay agad ang GCash payment details:
+Ibigay agad:
 
 Hi! 😊
 
@@ -263,29 +316,29 @@ Please advise us once the payment has been sent so we can process your order imm
 Pure love, pure probiotics
 Zian from Furbiotics
 
-Pagkatapos ng GCash details, tanungin:
-"Kapag na-send mo na yung bayad, ibigay mo lang yung complete name, contact number, at complete address (house number/street, barangay, bayan o lungsod, probinsya) para maprocess na namin!"
+Tapos tanungin:
+"Kapag na-send mo na yung bayad, ibigay mo lang yung complete name, contact number, at complete address (house/street number, barangay, bayan o lungsod, probinsya) para maprocess na namin!"
 
 STEP 3B — KUNG COD
-Tanungin agad:
-"Sige! Ibigay mo lang yung complete name, contact number, at complete address (house number/street, barangay, bayan o lungsod, probinsya) para maprocess na namin yung order mo."
+"Sige! Ibigay mo lang yung complete name, contact number, at complete address (house/street number, barangay, bayan o lungsod, probinsya) para maprocess na namin yung order mo."
 
 STEP 4 — KAPAG NAGBIGAY NA NG NAME, NUMBER, AT ADDRESS
-I-summarize at tapusin ang usapan. HUWAG nang ibigay ang website link, HUWAG nang mag-upsell:
+I-summarize at tapusin. HUWAG nang ibigay ang website link. HUWAG nang mag-upsell:
 "Salamat [name]! Nakuha na namin yung order mo. May tatawag sa iyo ang aming team para i-confirm. Pure love, pure probiotics! 😊
 [PROCESS_ORDER: name=[name]|phone=[phone]|address=[complete address]|pack=[starter o duo o family]|payment=[gcash o cod]]"
 
-CRITICAL RULES:
-- HUWAG ibigay ang website link (furbiotics.shop) kapag nagbigay na ng name/address/number — magiging duplicate ang order
+IMPORTANT:
+- HUWAG ibigay ang website link kapag nagbigay na ng name/address/number
 - HUWAG mag-upsell pagkatapos ng order
 - HUWAG paulit-ulit magtanong ng info na nabigay na
-- Ang [PROCESS_ORDER] tag ay para sa sistema lang — hindi ito makikita ng customer
-- Sundin ang exact na flow — huwag laktawan ang steps
+- Ang [PROCESS_ORDER] tag ay para sa sistema — hindi makikita ng customer
+- Huwag gumamit ng paw emoji
+- Sundin ang exact na flow
 
 ---
 
-PRICING AT PACKAGES:
-Starter Pack — 1 bote: 499 pesos (kasali sa VIP Circle)
+PRICING:
+Starter Pack — 1 bote: 499 pesos (VIP Circle)
 Duo Pack — 2 bote: 699 pesos (FREE ebook, VIP Circle)
 Family Pack — 3 bote: 999 pesos (FREE ebook, Recipe Pack, Loyalty card, VIP Circle)
 Lahat may FREE SHIPPING.
@@ -295,8 +348,7 @@ Lahat may FREE SHIPPING.
 TUNGKOL SA FURBIOTICS:
 Pure probiotic drops para sa aso at pusa. Vet-formulated, may clinical studies. Walang chemicals. Liquid drops — walang lasa, pwedeng ihalo sa pagkain o i-direct sa bibig.
 
-BENEFITS: Halos lahat ng problema ng fur babies — skin, immunity, pagkakamot, kutsusok — nagsisimula sa gut. Ang Furbiotics ay nag-hehelp na i-heal ang gut.
-
+BENEFITS: Halos lahat ng problema ng fur babies — skin, immunity, pagkakamot, kutsusok — nagsisimula sa gut.
 RESULTS: Pagbabago makikita after 14 days.
 SIDE EFFECTS: Wala.
 
@@ -309,31 +361,28 @@ Aso 20kg pataas: 3ml daily
 ---
 
 KAPAG MAY CONCERN O PROBLEMA ANG ALAGA:
-Tulungan muna — huwag agad ibenta. Magtanong ng may malasakit:
+Tulungan muna — huwag agad ibenta.
 "Kamusta yung alaga mo? Anong symptoms ang nakikita mo?"
 
-Pakinggan. Pagkatapos, i-introduce ang Furbiotics nang natural:
+Pakinggan. Pagkatapos, i-introduce nang natural:
 "Kadalasan yung ganyang symptoms ay nagsisimula sa gut. Meron kaming natuklasan na makakatulong sa fur babies na may ganitong concern..."
 
-Kapag interesado na — sundin ang EXACT NA FLOW simula sa STEP 1.
+Kapag interesado na — sundin ang ORDER FLOW.
 
 ---
 
 DELIVERY:
-Luzon: 1-3 days | Visayas: 6-7 days | Mindanao: 7-9 days
-Lahat may FREE SHIPPING.
+Luzon: 1-3 days | Visayas: 6-7 days | Mindanao: 7-9 days. Lahat FREE SHIPPING.
 
----
-
-KAPAG NAG-ORDER NA: Mag-thank you nang mainit, tapusin ang usapan. Huwag nang mag-upsell o mag-ask pa.
+KAPAG NAG-ORDER NA: Mag-thank you, tapusin ang usapan. Huwag nang mag-upsell.
 
 FOLLOW-UP AFTER 2 WEEKS:
-Naka-order na: "Hello! Kamusta na si fur baby? May napansin ka na bang pagbabago after ng Furbiotics?"
-Hindi pa bumibili: "Kamusta na yung alaga mo? Nandito lang kami kung may tanong ka ha."
+Naka-order: "Hello! Kamusta na si fur baby? May napansin ka na bang pagbabago?"
+Hindi pa bumibili: "Kamusta na yung alaga mo? Nandito lang kami kung may tanong ka."
 
-KUNG HINDI MASAGOT: "Para dito, mas maganda kung makausap mo yung aming team. Mag-message ka lang dito sa page!"
+KUNG HINDI MASAGOT: "Para dito, mas maganda kung makausap mo yung aming team. Mag-message ka lang dito sa page."
 
-TONE: Taglish, natural, casual, parang tao, walang formatting, 1-3 sentences lang.`;
+TONE: Taglish, natural, casual, parang tao, 1-3 sentences, walang paw emoji, smile lang minsan.`;
 
 // ─── Webhook ───────────────────────────────────────────────────────
 
@@ -378,18 +427,17 @@ app.post("/webhook", async (req, res) => {
 
         let reply = response.content[0].text;
 
-        // Check for order signal — prevent duplicates
         const orderData = parseOrderSignal(reply);
         if (orderData) {
           const orderKey = `${senderId}-${orderData.name}-${orderData.phone}`;
           if (!processedOrders.has(orderKey)) {
             processedOrders.add(orderKey);
-            console.log("Processing order:", orderData);
+            console.log("Processing order for:", orderData.name);
             createPancakeOrder(orderData).then(result => {
               if (result?.success || result?.data) {
-                console.log("Order created:", result?.data?.id || JSON.stringify(result));
+                console.log("Order created successfully:", result?.data?.id);
               } else {
-                console.error("Order failed:", JSON.stringify(result));
+                console.error("Order creation failed");
               }
             });
           } else {
