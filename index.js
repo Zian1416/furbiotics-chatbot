@@ -12,7 +12,6 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const PANCAKE_API_KEY = process.env.PANCAKE_API_KEY;
 const PANCAKE_SHOP_ID = process.env.PANCAKE_SHOP_ID;
 const PANCAKE_BASE = "https://pos.pages.fm/api/v1";
-const PSGC_BASE = "https://psgc.gitlab.io/api";
 
 const PACK_INFO = {
   starter: { custom_id: "SP-499", name: "Starter Pack - FurBiotics", price: 499000 },
@@ -23,17 +22,17 @@ const PACK_INFO = {
 const conversationHistory = {};
 const processedOrders = new Set();
 
-// Cache para hindi paulit-ulit mag-fetch ng PSGC data
-let psgcProvinces = null;
-let psgcCities = null;
+// Cache para sa address data
+let cachedProvinces = null;
 
-// ─── PSGC Address Resolution ───────────────────────────────────────
+// ─── Address Resolution using Pancake POS API ──────────────────────
 
 function normalize(str) {
   return (str || "").toLowerCase()
-    .replace(/\bcity\b/g, "")
-    .replace(/\bmunicipality\b/g, "")
+    .replace(/\bcity\b/gi, "")
+    .replace(/\bmunicipality\b/gi, "")
     .replace(/\bbrgy\.?\b/gi, "")
+    .replace(/\bbarangay\b/gi, "")
     .replace(/[^a-z0-9\s]/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -52,14 +51,17 @@ function similarity(a, b) {
   return matches.length / Math.max(wordsA.length, wordsB.length);
 }
 
-function findBestMatch(list, nameField, query) {
+function findBestMatch(list, nameFields, query) {
   if (!query || !list?.length) return null;
   let best = null, bestScore = 0;
+  const fields = Array.isArray(nameFields) ? nameFields : [nameFields];
   for (const item of list) {
-    const score = similarity(item[nameField] || "", query);
-    if (score > bestScore) { bestScore = score; best = item; }
+    for (const field of fields) {
+      const score = similarity(item[field] || "", query);
+      if (score > bestScore) { bestScore = score; best = item; }
+    }
   }
-  return bestScore > 0.3 ? { item: best, score: bestScore } : null;
+  return bestScore > 0.3 ? best : null;
 }
 
 function parseAddressParts(rawAddress) {
@@ -82,9 +84,11 @@ function parseAddressParts(rawAddress) {
     district = parts[0];
   }
 
-  // NCR special handling
-  if (/metro manila|ncr|national capital/i.test(province)) {
-    province = "Metro Manila";
+  // NCR/Metro Manila handling
+  if (/metro manila|ncr|national capital|quezon city|manila|makati|pasig|taguig|caloocan|las pinas|paranaque|pasay|valenzuela|malabon|mandaluyong|marikina|muntinlupa|navotas|san juan/i.test(province + " " + district)) {
+    if (!province || /metro manila|ncr/i.test(province)) {
+      province = "Metro Manila";
+    }
   }
 
   return { street, commune, district, province };
@@ -92,86 +96,66 @@ function parseAddressParts(rawAddress) {
 
 async function resolveAddressIds(province, district, commune) {
   try {
-    // Fetch all provinces from PSGC
-    if (!psgcProvinces) {
-      const res = await axios.get(`${PSGC_BASE}/provinces/`, { timeout: 8000 });
-      psgcProvinces = res.data;
+    // Step 1: Get all provinces from Pancake API
+    if (!cachedProvinces) {
+      const res = await axios.get(`${PANCAKE_BASE}/address/provinces`, {
+        params: { country_code: 63, all: true, api_key: PANCAKE_API_KEY },
+        timeout: 10000
+      });
+      cachedProvinces = res.data?.data || [];
+      console.log(`Loaded ${cachedProvinces.length} provinces from Pancake`);
     }
 
-    // Also fetch cities/municipalities if not cached
-    if (!psgcCities) {
-      const res = await axios.get(`${PSGC_BASE}/cities-municipalities/`, { timeout: 8000 });
-      psgcCities = res.data;
-    }
-
-    // Match province
-    let matchedProvince = null;
-    let province_id = null;
-    let province_name = null;
-
-    // Special NCR handling
-    if (/metro manila|ncr|quezon city|manila|makati|pasig|taguig|caloocan|las pinas|paranaque|pasay|valenzuela|malabon|mandaluyong|marikina|muntinlupa|navotas|pateros|san juan/i.test(province + " " + district)) {
-      province_id = "133900000"; // NCR PSGC code
-      province_name = "Metro Manila";
-    } else {
-      const provMatch = findBestMatch(psgcProvinces, "name", province);
-      if (provMatch) {
-        matchedProvince = provMatch.item;
-        province_id = matchedProvince.code;
-        province_name = matchedProvince.name;
-      }
-    }
-
-    if (!province_id) {
+    // Step 2: Match province
+    const matchedProvince = findBestMatch(cachedProvinces, ["name", "name_en"], province);
+    if (!matchedProvince) {
       console.log("Province not matched:", province);
       return null;
     }
+    console.log(`Province matched: ${matchedProvince.name} (${matchedProvince.id})`);
 
-    // Convert PSGC province code to Pancake province_id format
-    // PSGC: "0124900000" (Laguna) → Pancake uses shorter numeric IDs
-    // Based on observation: Pancake uses "101" style IDs which are region+province codes
-    const pancakeProvinceId = province_id.substring(0, 3).replace(/^0+/, "") || province_id;
+    // Step 3: Get districts for matched province
+    const distRes = await axios.get(`${PANCAKE_BASE}/address/districts`, {
+      params: { province_id: matchedProvince.id, api_key: PANCAKE_API_KEY },
+      timeout: 10000
+    });
+    const districts = distRes.data?.data || [];
+    const matchedDistrict = findBestMatch(districts, ["name", "name_en"], district);
 
-    // Match city/municipality
-    let district_id = null;
-    let district_name = null;
-
-    const cityMatch = findBestMatch(psgcCities, "name", district);
-    if (cityMatch) {
-      const city = cityMatch.item;
-      district_id = city.code?.substring(0, 5).replace(/^0+/, "") || null;
-      district_name = city.name;
+    if (!matchedDistrict) {
+      console.log("District not matched:", district);
+      return {
+        province_id: matchedProvince.id,
+        province_name: matchedProvince.name
+      };
     }
+    console.log(`District matched: ${matchedDistrict.name} (${matchedDistrict.id})`);
 
-    // Match barangay if commune provided
-    let commune_id = null;
-    let commune_name = null;
-
-    if (commune && district_id) {
+    // Step 4: Get communes/barangays for matched district
+    let commune_id = null, commune_name = null;
+    if (commune) {
       try {
-        // Get barangays for matched city
-        const cityCode = cityMatch?.item?.code;
-        if (cityCode) {
-          const brgyRes = await axios.get(`${PSGC_BASE}/cities-municipalities/${cityCode}/barangays/`, { timeout: 8000 });
-          const barangays = brgyRes.data;
-          const brgyMatch = findBestMatch(barangays, "name", commune);
-          if (brgyMatch) {
-            commune_id = brgyMatch.item.code?.replace(/^0+/, "") || null;
-            commune_name = brgyMatch.item.name;
-          }
+        const commRes = await axios.get(`${PANCAKE_BASE}/address/communes`, {
+          params: { district_id: matchedDistrict.id, api_key: PANCAKE_API_KEY },
+          timeout: 10000
+        });
+        const communes = commRes.data?.data || [];
+        const matchedCommune = findBestMatch(communes, ["name", "name_en"], commune);
+        if (matchedCommune) {
+          commune_id = matchedCommune.id;
+          commune_name = matchedCommune.name;
+          console.log(`Commune matched: ${matchedCommune.name} (${matchedCommune.id})`);
         }
       } catch (e) {
-        console.log("Barangay lookup failed:", e.message);
+        console.log("Commune lookup failed:", e.message);
       }
     }
 
-    console.log("Resolved IDs:", { province_id: pancakeProvinceId, province_name, district_id, district_name, commune_id, commune_name });
-
     return {
-      province_id: pancakeProvinceId,
-      province_name: province_name || province,
-      district_id,
-      district_name: district_name || district,
+      province_id: matchedProvince.id,
+      province_name: matchedProvince.name,
+      district_id: matchedDistrict.id,
+      district_name: matchedDistrict.name,
       commune_id,
       commune_name: commune_name || commune
     };
@@ -181,7 +165,7 @@ async function resolveAddressIds(province, district, commune) {
   }
 }
 
-// ─── Pancake Helpers ───────────────────────────────────────────────
+// ─── Pancake Order Creation ────────────────────────────────────────
 
 async function getProductVariation(custom_id) {
   try {
@@ -211,12 +195,13 @@ async function createPancakeOrder(orderData) {
 
     const { street, commune, district, province } = parseAddressParts(address);
     const addrIds = await resolveAddressIds(province, district, commune);
+    console.log("Address resolved:", addrIds);
 
     const shippingAddress = {
       full_name: name,
       phone_number: cleanPhone,
-      address: street || address,
-      full_address: [street, commune, district, province].filter(Boolean).join(", "),
+      address: street || commune || address,
+      full_address: address,
       country_code: "63",
       ...(addrIds && {
         province_id: addrIds.province_id,
@@ -248,10 +233,10 @@ async function createPancakeOrder(orderData) {
       payload,
       { params: { api_key: PANCAKE_API_KEY } }
     );
-    console.log("Order created:", res.data?.data?.id || JSON.stringify(res.data).substring(0, 200));
+    console.log("Order created:", res.data?.data?.id);
     return res.data;
   } catch (e) {
-    console.error("createPancakeOrder error:", e.message, JSON.stringify(e.response?.data || {}).substring(0, 200));
+    console.error("createPancakeOrder error:", e.message, JSON.stringify(e.response?.data || {}).substring(0, 300));
     return null;
   }
 }
@@ -282,6 +267,7 @@ RULES SA PAGSAGOT:
 - Huwag paulit-ulit magtanong ng info na nabigay na
 - Mukhang tao ang dating, hindi bot
 - Huwag mag-upsell pagkatapos ng order
+- Huwag mag-follow up ng "May I help you with anything else?" o katulad nito pagkatapos ng order
 
 ---
 
@@ -294,10 +280,10 @@ Ibigay MUNA ang pricing, tapos tanungin kung alin ang gusto.
 "Meron kaming tatlong options: Starter Pack (1 bote) 499 pesos, Duo Pack (2 bote) 699 pesos, at Family Pack (3 bote) 999 pesos. Lahat may free shipping. Alin sa tatlo ang trip mo?"
 
 STEP 2 — KAPAG PUMILI NA NG PACK
-"GCash o COD?"
+Tanungin lang: "GCash o COD?"
 
 STEP 3A — KUNG GCASH
-Ibigay agad:
+Ibigay agad ang GCash details:
 
 Hi! 😊
 
@@ -316,20 +302,37 @@ Please advise us once the payment has been sent so we can process your order imm
 Pure love, pure probiotics
 Zian from Furbiotics
 
-Tapos tanungin:
-"Kapag na-send mo na yung bayad, ibigay mo lang yung complete name, contact number, at complete address (house/street number, barangay, bayan o lungsod, probinsya) para maprocess na namin!"
+Pagkatapos, i-send ang order form:
+
+Para maprocess na namin yung order mo, fill up lang ito:
+
+Pangalan:
+Contact Number:
+House No./Street:
+Barangay:
+Bayan/Lungsod:
+Probinsya:
 
 STEP 3B — KUNG COD
-"Sige! Ibigay mo lang yung complete name, contact number, at complete address (house/street number, barangay, bayan o lungsod, probinsya) para maprocess na namin yung order mo."
+I-send agad ang order form:
 
-STEP 4 — KAPAG NAGBIGAY NA NG NAME, NUMBER, AT ADDRESS
-I-summarize at tapusin. HUWAG nang ibigay ang website link. HUWAG nang mag-upsell:
+Sige! Fill up lang ito para maprocess na namin yung order mo:
+
+Pangalan:
+Contact Number:
+House No./Street:
+Barangay:
+Bayan/Lungsod:
+Probinsya:
+
+STEP 4 — KAPAG NA-FILL UP ANG FORM
+Kapag nagbigay na ng pangalan, number, at address parts — i-summarize at tapusin:
 "Salamat [name]! Nakuha na namin yung order mo. May tatawag sa iyo ang aming team para i-confirm. Pure love, pure probiotics! 😊
-[PROCESS_ORDER: name=[name]|phone=[phone]|address=[complete address]|pack=[starter o duo o family]|payment=[gcash o cod]]"
+[PROCESS_ORDER: name=[name]|phone=[phone]|address=[house/street], [barangay], [bayan/lungsod], [probinsya]|pack=[starter o duo o family]|payment=[gcash o cod]]"
 
 IMPORTANT:
-- HUWAG ibigay ang website link kapag nagbigay na ng name/address/number
-- HUWAG mag-upsell pagkatapos ng order
+- HUWAG ibigay ang website link (furbiotics.shop) kapag nagbigay na ng order details — magiging duplicate
+- HUWAG mag-upsell o mag-ask ng follow-up pagkatapos ng order
 - HUWAG paulit-ulit magtanong ng info na nabigay na
 - Ang [PROCESS_ORDER] tag ay para sa sistema — hindi makikita ng customer
 - Huwag gumamit ng paw emoji
@@ -364,17 +367,16 @@ KAPAG MAY CONCERN O PROBLEMA ANG ALAGA:
 Tulungan muna — huwag agad ibenta.
 "Kamusta yung alaga mo? Anong symptoms ang nakikita mo?"
 
-Pakinggan. Pagkatapos, i-introduce nang natural:
+Pakinggan. Pagkatapos i-introduce nang natural:
 "Kadalasan yung ganyang symptoms ay nagsisimula sa gut. Meron kaming natuklasan na makakatulong sa fur babies na may ganitong concern..."
 
 Kapag interesado na — sundin ang ORDER FLOW.
 
 ---
 
-DELIVERY:
-Luzon: 1-3 days | Visayas: 6-7 days | Mindanao: 7-9 days. Lahat FREE SHIPPING.
+DELIVERY: Luzon: 1-3 days | Visayas: 6-7 days | Mindanao: 7-9 days. Lahat FREE SHIPPING.
 
-KAPAG NAG-ORDER NA: Mag-thank you, tapusin ang usapan. Huwag nang mag-upsell.
+KAPAG NAG-ORDER NA: Mag-thank you, tapusin ang usapan. Huwag nang mag-upsell o mag-ask ng anumang follow-up question.
 
 FOLLOW-UP AFTER 2 WEEKS:
 Naka-order: "Hello! Kamusta na si fur baby? May napansin ka na bang pagbabago?"
@@ -432,16 +434,16 @@ app.post("/webhook", async (req, res) => {
           const orderKey = `${senderId}-${orderData.name}-${orderData.phone}`;
           if (!processedOrders.has(orderKey)) {
             processedOrders.add(orderKey);
-            console.log("Processing order for:", orderData.name);
+            console.log("Processing order:", orderData.name, orderData.pack);
             createPancakeOrder(orderData).then(result => {
               if (result?.success || result?.data) {
-                console.log("Order created successfully:", result?.data?.id);
+                console.log("Order created:", result?.data?.id);
               } else {
-                console.error("Order creation failed");
+                console.error("Order failed");
               }
             });
           } else {
-            console.log("Duplicate order prevented:", orderKey);
+            console.log("Duplicate prevented:", orderKey);
           }
           reply = reply.replace(/\[PROCESS_ORDER:[^\]]+\]/g, "").trim();
         }
