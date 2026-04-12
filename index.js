@@ -23,8 +23,9 @@ const PACK_QUANTITY = { starter: 1, duo: 2, family: 3 };
 
 const conversationHistory = {};
 const processedOrders = new Set();
-const processingLock = new Set();   // FIX: double reply prevention
-const adminPausedChats = new Set(); // FIX: admin takeover
+const processedMessageIds = new Set(); // FIX: deduplicate by Meta message ID
+const processingLock = new Set();      // FIX: prevent concurrent processing per user
+const adminPausedChats = new Set();    // FIX: admin takeover
 
 let cachedProvinces = null;
 const cachedDistricts = {};
@@ -632,9 +633,22 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // ── DOUBLE REPLY LOCK ──────────────────────────────────────
+      // ── DEDUP BY MESSAGE ID (mid) ─────────────────────────────
+      // Meta sometimes sends the same webhook event twice — block by message ID
+      const messageId = event.message.mid;
+      if (messageId) {
+        if (processedMessageIds.has(messageId)) {
+          console.log(`Duplicate message ID detected, skipping: ${messageId}`);
+          continue;
+        }
+        processedMessageIds.add(messageId);
+        // Auto-cleanup after 10 minutes to prevent memory leak
+        setTimeout(() => processedMessageIds.delete(messageId), 10 * 60 * 1000);
+      }
+
+      // ── DOUBLE REPLY LOCK (concurrent requests for same user) ──
       if (processingLock.has(senderId)) {
-        console.log(`Already processing for ${senderId} — skipping duplicate event`);
+        console.log(`Already processing for ${senderId} — skipping concurrent event`);
         continue;
       }
       processingLock.add(senderId);
