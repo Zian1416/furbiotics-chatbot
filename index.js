@@ -22,88 +22,8 @@ const PACK_INFO = {
 const conversationHistory = {};
 const processedOrders = new Set();
 
-// ─── Static Address Lookup Table ──────────────────────────────────
-// IDs extracted from Pancake POS network calls (format: 63_XXX)
-
-const PROVINCE_MAP = [
-  { id: "63_598", name: "Abra" },
-  { id: "63_513", name: "Agusan-del-norte" },
-  { id: "63_701", name: "Agusan-del-sur" },
-  { id: "63_505", name: "Aklan" },
-  { id: "63_506", name: "Albay" },
-  { id: "63_507", name: "Antique" },
-  { id: "63_599", name: "Apayao" },
-  { id: "63_301", name: "Aurora" },
-  { id: "63_302", name: "Bataan" },
-  { id: "63_601", name: "Batanes" },
-  { id: "63_401", name: "Batangas" },
-  { id: "63_602", name: "Benguet" },
-  { id: "63_509", name: "Bohol" },
-  { id: "63_508", name: "Biliran" },
-  { id: "63_303", name: "Bulacan" },
-  { id: "63_603", name: "Cagayan" },
-  { id: "63_510", name: "Camiguin" },
-  { id: "63_511", name: "Capiz" },
-  { id: "63_402", name: "Cavite" },
-  { id: "63_512", name: "Cebu" },
-  { id: "63_703", name: "Davao-del-norte" },
-  { id: "63_704", name: "Davao-del-sur" },
-  { id: "63_705", name: "Davao-occidental" },
-  { id: "63_706", name: "Davao-oriental" },
-  { id: "63_707", name: "Dinagat-islands" },
-  { id: "63_403", name: "Eastern-samar" },
-  { id: "63_605", name: "Ifugao" },
-  { id: "63_606", name: "Ilocos-norte" },
-  { id: "63_607", name: "Ilocos-sur" },
-  { id: "63_404", name: "Iloilo" },
-  { id: "63_608", name: "Isabela" },
-  { id: "63_609", name: "Kalinga" },
-  { id: "63_610", name: "La-union" },
-  { id: "63_405", name: "Laguna" },
-  { id: "63_514", name: "Lanao-del-norte" },
-  { id: "63_708", name: "Lanao-del-sur" },
-  { id: "63_304", name: "Leyte" },
-  { id: "63_709", name: "Maguindanao" },
-  { id: "63_305", name: "Marinduque" },
-  { id: "63_406", name: "Masbate" },
-  { id: "63_219", name: "Metro-manila" },
-  { id: "63_712", name: "Misamis-occidental" },
-  { id: "63_515", name: "Misamis-oriental" },
-  { id: "63_610b", name: "Mountain-province" },
-  { id: "63_407", name: "Negros-occidental" },
-  { id: "63_408", name: "Negros-oriental" },
-  { id: "63_516", name: "North-cotabato" },
-  { id: "63_611", name: "Northern-samar" },
-  { id: "63_612", name: "Nueva-ecija" },
-  { id: "63_613", name: "Nueva-vizcaya" },
-  { id: "63_306", name: "Occidental-mindoro" },
-  { id: "63_307", name: "Oriental-mindoro" },
-  { id: "63_517", name: "Palawan" },
-  { id: "63_409", name: "Pampanga" },
-  { id: "63_410", name: "Pangasinan" },
-  { id: "63_411", name: "Quezon" },
-  { id: "63_614", name: "Quirino" },
-  { id: "63_412", name: "Rizal" },
-  { id: "63_518", name: "Romblon" },
-  { id: "63_413", name: "Samar" },
-  { id: "63_615", name: "Sarangani" },
-  { id: "63_616", name: "Siquijor" },
-  { id: "63_519", name: "Sorsogon" },
-  { id: "63_617", name: "South-cotabato" },
-  { id: "63_308", name: "Southern-leyte" },
-  { id: "63_618", name: "Sultan-kudarat" },
-  { id: "63_713", name: "Sulu" },
-  { id: "63_619", name: "Surigao-del-norte" },
-  { id: "63_714", name: "Surigao-del-sur" },
-  { id: "63_414", name: "Tarlac" },
-  { id: "63_715", name: "Tawi-tawi" },
-  { id: "63_415", name: "Zambales" },
-  { id: "63_620", name: "Zamboanga-del-norte" },
-  { id: "63_716", name: "Zamboanga-del-sur" },
-  { id: "63_717", name: "Zamboanga-sibugay" }
-];
-
-// Cache for districts fetched at runtime
+// Cache
+let cachedProvinces = null;
 const cachedDistricts = {};
 const cachedCommunes = {};
 
@@ -166,92 +86,119 @@ function parseAddressParts(rawAddress) {
     district = parts[0];
   }
 
-  // NCR special handling
-  const ncrCities = ["quezon city", "manila", "makati", "pasig", "taguig", "caloocan", "las pinas", "paranaque", "pasay", "valenzuela", "malabon", "mandaluyong", "marikina", "muntinlupa", "navotas", "san juan", "pateros"];
-  if (/metro manila|ncr/i.test(province) || ncrCities.some(c => normalize(district).includes(normalize(c)))) {
+  const ncrKeywords = ["metro manila", "ncr", "quezon city", "makati", "pasig", "taguig", "caloocan", "manila", "paranaque", "las pinas", "pasay", "valenzuela", "malabon", "mandaluyong", "marikina", "muntinlupa", "navotas", "san juan", "pateros"];
+  const allText = (province + " " + district).toLowerCase();
+  if (ncrKeywords.some(k => allText.includes(k))) {
     if (!province || /metro manila|ncr/i.test(province)) province = "Metro Manila";
   }
 
   return { street, commune, district, province };
 }
 
-async function fetchDistricts(provinceId) {
-  if (cachedDistricts[provinceId]) return cachedDistricts[provinceId];
+async function fetchProvinces() {
+  if (cachedProvinces) return cachedProvinces;
   try {
-    const res = await axios.get(`${PANCAKE_BASE}/address/districts`, {
-      params: { province_id: provinceId },
-      headers: { "api-key": PANCAKE_API_KEY },
+    const res = await axios.get(`${PANCAKE_BASE}/geo/provinces`, {
+      params: { country_code: 63, api_key: PANCAKE_API_KEY },
       timeout: 10000
     });
     const data = res.data?.data || [];
-    if (data.length) cachedDistricts[provinceId] = data;
+    if (data.length) {
+      cachedProvinces = data;
+      console.log(`Provinces loaded: ${data.length}, sample: ${JSON.stringify(data[0])}`);
+    }
     return data;
   } catch (e) {
-    console.log(`fetchDistricts failed for ${provinceId}:`, e.message);
+    console.error("fetchProvinces error:", e.message);
     return [];
   }
 }
 
-async function fetchCommunes(districtId) {
-  if (cachedCommunes[districtId]) return cachedCommunes[districtId];
+async function fetchDistricts(provinceId) {
+  if (cachedDistricts[provinceId]) return cachedDistricts[provinceId];
   try {
-    const res = await axios.get(`${PANCAKE_BASE}/address/communes`, {
-      params: { district_id: districtId },
-      headers: { "api-key": PANCAKE_API_KEY },
+    const res = await axios.get(`${PANCAKE_BASE}/geo/districts`, {
+      params: { province_id: provinceId, api_key: PANCAKE_API_KEY },
       timeout: 10000
     });
     const data = res.data?.data || [];
-    if (data.length) cachedCommunes[districtId] = data;
+    if (data.length) {
+      cachedDistricts[provinceId] = data;
+      console.log(`Districts loaded: ${data.length} for province ${provinceId}`);
+    }
     return data;
   } catch (e) {
-    console.log(`fetchCommunes failed for ${districtId}:`, e.message);
+    console.error(`fetchDistricts error for ${provinceId}:`, e.message);
+    return [];
+  }
+}
+
+async function fetchCommunes(districtId, provinceId) {
+  const key = `${districtId}_${provinceId}`;
+  if (cachedCommunes[key]) return cachedCommunes[key];
+  try {
+    const res = await axios.get(`${PANCAKE_BASE}/geo/communes`, {
+      params: { district_id: districtId, province_id: provinceId, api_key: PANCAKE_API_KEY },
+      timeout: 10000
+    });
+    const data = res.data?.data || [];
+    if (data.length) {
+      cachedCommunes[key] = data;
+      console.log(`Communes loaded: ${data.length} for district ${districtId}`);
+    }
+    return data;
+  } catch (e) {
+    console.error(`fetchCommunes error for ${districtId}:`, e.message);
     return [];
   }
 }
 
 async function resolveAddressIds(province, district, commune) {
   try {
-    // Step 1: Match province from static map
-    const matchedProvince = findBestMatch(PROVINCE_MAP, "name", province);
+    // Step 1: Get provinces
+    const provinces = await fetchProvinces();
+    if (!provinces.length) {
+      console.log("No provinces available");
+      return null;
+    }
+
+    const matchedProvince = findBestMatch(provinces, ["name", "name_en"], province);
     if (!matchedProvince) {
       console.log("Province not matched:", province);
       return null;
     }
     console.log(`Province: ${matchedProvince.name} (${matchedProvince.id})`);
 
-    // Step 2: Fetch districts from Pancake (these ARE accessible with api-key header)
+    // Step 2: Get districts
     const districts = await fetchDistricts(matchedProvince.id);
-    console.log(`Districts loaded: ${districts.length} for ${matchedProvince.name}`);
-
     if (!districts.length) {
-      return { province_id: matchedProvince.id, province_name: matchedProvince.name };
+      return { province_id: matchedProvince.id, province_name: matchedProvince.name_en || matchedProvince.name };
     }
 
     const matchedDistrict = findBestMatch(districts, ["name", "name_en"], district);
     if (!matchedDistrict) {
       console.log("District not matched:", district);
-      return { province_id: matchedProvince.id, province_name: matchedProvince.name };
+      return { province_id: matchedProvince.id, province_name: matchedProvince.name_en || matchedProvince.name };
     }
     console.log(`District: ${matchedDistrict.name} (${matchedDistrict.id})`);
 
-    // Step 3: Fetch communes
+    // Step 3: Get communes
     let commune_id = null, commune_name = null;
     if (commune) {
-      const communes = await fetchCommunes(matchedDistrict.id);
-      console.log(`Communes loaded: ${communes.length}`);
+      const communes = await fetchCommunes(matchedDistrict.id, matchedProvince.id);
       const matchedCommune = findBestMatch(communes, ["name", "name_en"], commune);
       if (matchedCommune) {
         commune_id = matchedCommune.id;
-        commune_name = matchedCommune.name;
+        commune_name = matchedCommune.name_en || matchedCommune.name;
         console.log(`Commune: ${matchedCommune.name} (${matchedCommune.id})`);
       }
     }
 
     return {
       province_id: matchedProvince.id,
-      province_name: matchedProvince.name,
+      province_name: matchedProvince.name_en || matchedProvince.name,
       district_id: matchedDistrict.id,
-      district_name: matchedDistrict.name,
+      district_name: matchedDistrict.name_en || matchedDistrict.name,
       commune_id,
       commune_name: commune_name || commune
     };
@@ -399,7 +346,7 @@ Pure love, pure probiotics
 Zian from Furbiotics
 
 Then send the order form:
-"Once you've sent the payment, please fill this out so we can process your order:
+"Once you've sent the payment, please fill this out:
 
 Name:
 Phone#:
@@ -427,7 +374,7 @@ Once you have name, phone, and complete address — summarize and close:
 [PROCESS_ORDER: name=[name]|phone=[phone]|address=[house/street], [barangay], [city/municipality], [province]|pack=[starter or duo or family]|payment=[gcash or cod]]"
 
 IMPORTANT RULES:
-- NEVER give the website link (furbiotics.shop) once customer has provided their details — it causes duplicate orders
+- NEVER give the website link (furbiotics.shop) once customer has provided their details
 - NEVER upsell or ask follow-up questions after order is placed
 - NEVER repeat questions about info already provided
 - The [PROCESS_ORDER] tag is for the system only — customer will not see it
@@ -471,18 +418,17 @@ Once interested — follow the ORDER FLOW above.
 
 ---
 
-DELIVERY:
-Luzon: 1-3 days | Visayas: 6-7 days | Mindanao: 7-9 days. All with FREE SHIPPING.
+DELIVERY: Luzon: 1-3 days | Visayas: 6-7 days | Mindanao: 7-9 days. All FREE SHIPPING.
 
-AFTER ORDER IS PLACED: Give a warm thank you and end the conversation. No upsell, no follow-up questions.
+AFTER ORDER: Warm thank you, end conversation. No upsell, no follow-up questions.
 
 FOLLOW-UP AFTER 2 WEEKS:
 Ordered: "Hello! How is your fur baby doing? Have you noticed any changes since starting Furbiotics?"
-Not yet ordered: "How is your pet doing? We're here if you have any questions."
+Not yet: "How is your pet doing? We're here if you have any questions."
 
 IF UNABLE TO ANSWER: "For that, it's best to speak with our team directly. Feel free to message us here on the page!"
 
-TONE: Taglish or English, natural, casual, like a real person, 1-3 sentences, no paw emojis, occasional smile only.`;
+TONE: Taglish or English, natural, casual, 1-3 sentences, no paw emojis, smile only occasionally.`;
 
 // ─── Webhook ───────────────────────────────────────────────────────
 
@@ -512,7 +458,6 @@ app.post("/webhook", async (req, res) => {
 
       try {
         if (!conversationHistory[senderId]) conversationHistory[senderId] = [];
-
         conversationHistory[senderId].push({ role: "user", content: messageText });
         if (conversationHistory[senderId].length > 20) {
           conversationHistory[senderId] = conversationHistory[senderId].slice(-20);
