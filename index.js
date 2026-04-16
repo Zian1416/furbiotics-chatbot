@@ -843,9 +843,38 @@ app.post("/webhook", async (req, res) => {
 
 // ─── Messenger Send ───────────────────────────────────────────────
 
+function getTypingDelay(text) {
+  const len = text.length;
+  // Short reply: 2-3s | Medium: 4-6s | Long: 7-10s
+  if (len < 100)  return 2000 + Math.random() * 1000;
+  if (len < 300)  return 4000 + Math.random() * 2000;
+  return           7000 + Math.random() * 3000;
+}
+
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function sendTypingIndicator(recipientId) {
+  try {
+    await axios.post(
+      "https://graph.facebook.com/v19.0/me/messages",
+      { recipient: { id: recipientId }, sender_action: "typing_on" },
+      { params: { access_token: PAGE_ACCESS_TOKEN } }
+    );
+  } catch (e) {
+    console.error("Typing indicator error:", e.message);
+  }
+}
+
 async function sendMessage(recipientId, text) {
   const chunks = splitMessage(text, 2000);
   for (const chunk of chunks) {
+    // Show typing indicator
+    await sendTypingIndicator(recipientId);
+    // Wait based on chunk length — feels natural
+    await sleep(getTypingDelay(chunk));
+    // Send the actual message
     await axios.post(
       "https://graph.facebook.com/v19.0/me/messages",
       { recipient: { id: recipientId }, message: { text: chunk } },
