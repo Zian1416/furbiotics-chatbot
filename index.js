@@ -19,7 +19,8 @@ const PACK_INFO = {
   family:  { custom_id: "FP-999", name: "Family Pack - Furbiotics",  price: 999000, label: "Family Pack (3 bottles) - ₱999" }
 };
 
-const PACK_QUANTITY = { starter: 1, duo: 2, family: 3 };
+// Quantity is always 1 unit per order — bottles count is defined by the product itself in POS
+const PACK_QUANTITY = { starter: 1, duo: 1, family: 1 };
 
 const conversationHistory = {};
 const processedOrders = new Set();
@@ -768,12 +769,90 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+// ─── Comment Keywords ─────────────────────────────────────────────
+const SCOPE1_KEYWORDS = [
+  "hm", "how much", "magkano", "magkano po", "pila",
+  "presyo", "price", "interested", "interesado",
+  "paano mag-order", "paano umorder", "how to order",
+  "saan mabibili", "saan bibili", "gusto ko", "order"
+];
+
+const SCOPE1_REPLY = `Kamusta po! 😊
+
+Para po sa pinakamadaling checkout, bumisita dito:
+👉 https://www.furbiotics.shop/shop
+
+O mag-message lang po kayo sa amin dito sa page para matulungan kayo personally!`;
+
+const SCOPE2_REPLY = `Salamat po sa comment! 😊 Mag-message lang po kayo sa amin dito sa page para matulungan kayo!`;
+
+const processedCommentIds = new Set();
+
+function isScope1(text) {
+  const lower = (text || "").toLowerCase().trim();
+  return SCOPE1_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+async function replyToComment(commentId, message) {
+  try {
+    await axios.post(
+      "https://graph.facebook.com/v19.0/" + commentId + "/comments",
+      { message },
+      { params: { access_token: PAGE_ACCESS_TOKEN } }
+    );
+    console.log("Comment replied to:", commentId);
+  } catch (e) {
+    console.error("replyToComment error:", e.message);
+  }
+}
+
+// ─── Webhook ──────────────────────────────────────────────────────
+
 app.post("/webhook", async (req, res) => {
   const body = req.body;
   if (body.object !== "page") return res.sendStatus(404);
   res.sendStatus(200);
 
   for (const entry of body.entry) {
+
+    // ── COMMENT HANDLER (feed) ──────────────────────────────────
+    if (entry.changes) {
+      for (const change of entry.changes) {
+        if (change.field !== "feed") continue;
+        const val = change.value;
+
+        // Only handle comments, not likes/reactions/posts
+        if (val.item !== "comment") continue;
+        if (val.verb !== "add") continue; // only new comments, not edits
+
+        const commentId = val.comment_id;
+        const commentText = val.message || "";
+        const commenterId = val.sender_id || val.from?.id;
+
+        // Skip if no comment ID or already processed
+        if (!commentId) continue;
+        if (processedCommentIds.has(commentId)) continue;
+        processedCommentIds.add(commentId);
+        setTimeout(() => processedCommentIds.delete(commentId), 30 * 60 * 1000);
+
+        // Skip bot's own comments (page ID)
+        if (commenterId === entry.id) continue;
+
+        console.log("New comment:", commentId, "| Text:", commentText);
+
+        if (isScope1(commentText)) {
+          console.log("Scope 1 comment — replying with price/order info");
+          await replyToComment(commentId, SCOPE1_REPLY);
+        } else {
+          console.log("Scope 2 comment — replying with message prompt");
+          await replyToComment(commentId, SCOPE2_REPLY);
+        }
+      }
+      continue;
+    }
+
+    // ── MESSENGER HANDLER (messaging) ──────────────────────────
+    if (!entry.messaging) continue;
     for (const event of entry.messaging) {
       if (!event.message) continue;
 
