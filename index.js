@@ -677,12 +677,39 @@ DELIVERY INFORMATION
 - Free shipping on all packs
 
 USAGE GUIDE
-Each bottle is 30ml.
-- Cats: 0.5ml daily
-- Dogs under 10kg: 1ml daily
-- Dogs 10kg to 20kg: 2ml daily
-- Dogs over 20kg: 3ml daily
-Can be mixed with food or given directly. Store at room temperature.
+Each bottle is 30ml. Serving size is 1ml (full dropper). 30-60 servings per bottle.
+
+Cats: 0.5ml daily (mix with food or give directly)
+Dogs under 10kg: 1ml daily
+Dogs 10kg to 20kg: 2ml daily
+Dogs over 20kg: 3ml daily
+
+Can be mixed with food or given directly.
+Once opened, refrigeration is recommended to maintain freshness and potency.
+Use for 7-14 days during digestive upset, or as a daily supplement for gut health.
+
+---
+
+INGREDIENTS — SUPPLEMENT FACTS (per 1ml)
+Active Ingredients:
+- Lactobacillus acidophilus — 1 Billion CFU
+- Bifidobacterium animalis — 1 Billion CFU
+- Enterococcus faecium — 0.5 Billion CFU
+- Saccharomyces boulardii — 0.5 Billion CFU
+- Fructooligosaccharides (FOS) — 50mg
+- Electrolyte base (Na, K, Mg) — Trace amounts
+
+Other Ingredients: Purified water only.
+
+No fillers. No junk. No artificial flavorings.
+100% Pure Probiotics. Vet-Formulated. Pet-Safe.
+
+CAUTIONS (share only when relevant):
+- For animal use only
+- Do not exceed suggested dose unless advised by a veterinarian
+- Not intended for pregnant or lactating pets unless cleared by a vet
+- Store in a cool, dry place
+- Keep out of reach of children and other animals
 
 ---
 
